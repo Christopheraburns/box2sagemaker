@@ -9,57 +9,13 @@ import boto3
 import logging
 import json
 import io
-import timeit
+import time
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-# TODO make these variables globals until a better solution for timeit presents itself
-file_id = ""
-read_token = ""
-file_name = ""
-file_Size = ""
-xferTime = 0.0
-xferRate = 0.0
-
-def streamFromBoxtoS3():
-    global file_Size
-    # Get the file info so we can see if this Lambda function has sufficient time to download it
-    url = 'https://api.box.com/2.0/files/' + file_id + '?access_token=' + read_token
-    r = requests.get(url)
-    json_ = json.loads(r.content)
-    file_Size = json_['size']
-    logger.info('Filesize = ' + str(file_Size) + ' bytes')
-
-    # TODO
-    # Write some code to determine if the file can be streamed to S3 within 4+ minutes - if not, move to chunky upload
-
-    # Stream the newly found file on Box to S3
-    logger.info("Streaming target file(" + file_name + ") from api.box.com")
-    url = 'https://api.box.com/2.0/files/' + file_id + '/content?access_token=' + read_token
-    r = requests.get(url)
-
-    buffer = io.BytesIO()
-    buffer.write(r.content)
-    # reset memory stream back to the beginning of the file
-    buffer.seek(0)
-
-    # upload the file from box to S3
-    logger.info("Writing file stream to S3...")
-    s3 = boto3.resource('s3')
-
-    try:
-        s3.Object('box2sagemaker', "train/" + file_name).upload_fileobj(buffer)
-        buffer.close()
-
-    except Exception as err:
-        logger.error("Unable to stream from Box to S3! " + err)
-
 
 def lambda_handler(event, context):
-    global read_token
-    global file_id
-    global file_name
 
     logger.info("Extracting BoxSkill payload-parameters from the event object")
     skill = event['skill']['id']
@@ -90,17 +46,51 @@ def lambda_handler(event, context):
         file_name = "not_found"  # Fatal error - no way to stream the box file to s2 without this.
         # TODO - exit gracefully
 
+    # Get the file info so we can see if this Lambda function has sufficient time to download it
+    url = 'https://api.box.com/2.0/files/' + file_id + '?access_token=' + read_token
+    r = requests.get(url)
+    json_ = json.loads(r.content)
+    file_Size = json_['size']
+    logger.info('Filesize = ' + str(file_Size) + ' bytes')
+
+    # TODO
+    # Write some code to determine if the file can be streamed to S3 within 4+ minutes - if not, move to chunky upload
+
+    start = time.time()
+    # Stream the newly found file on Box to S3
+    logger.info("Streaming target file(" + file_name + ") from api.box.com")
+    url = 'https://api.box.com/2.0/files/' + file_id + '/content?access_token=' + read_token
+    r = requests.get(url)
+
+    buffer = io.BytesIO()
+    buffer.write(r.content)
+    # reset memory stream back to the beginning of the file
+    buffer.seek(0)
+
+    # upload the file from box to S3
+    logger.info("Writing file stream to S3...")
+    s3 = boto3.resource('s3')
+
+    try:
+        s3.Object('box2sagemaker', "train/" + file_name).upload_fileobj(buffer)
+        buffer.close()
+
+    except Exception as err:
+        logger.error("Unable to stream from Box to S3! " + err)
+
+    stop = time.time()
     # log a few details from the transfer
-    xferTime = timeit.timeit(streamFromBoxtoS3)  # total transfer time
+
+    xferTime = stop - start # in seconds
     mb = file_Size / 1000000  # convert file size to MB
-    xferRate = mb / xferTime
+    xferRate = mb / float(xferTime)
 
     logger.info("FileStreamTime: {}".format(xferTime))
     logger.info("TransferRate: {} (mb/sec)".format(xferRate))
 
     parse_result = '{"skill-id": ' + skill + ', "write_token": ' + write_token + ', \
                     "read_token": ' + read_token + ', "file_id": ' + file_id + ', "file_name": ' + file_name + ', \
-                    "StreamTransferTime": ' + xferTime + ', "StreamTransferRate": ' + xferRate + '}'
+                    "StreamTransferTime": ' + str(xferTime) + ', "StreamTransferRate": ' + str(xferRate) + '}'
 
     # NOTE!!!!  This writes Write and Read tokens to CloudWatch - don't do this!!!  This is only for development
     # Read the above ^^ note ^^ that you probably skipped over!!
